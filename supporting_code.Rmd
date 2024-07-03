@@ -1,0 +1,546 @@
+---
+title: "Synergistic Effects of Environmental Toxins on Kidney Health Using Ensemble Learning Techniques"
+author: "MAX J. TYLER"
+date: "2023-11-21"
+output:
+  word_document:
+    toc: yes
+  html_document:
+    toc: yes
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+    number_sections: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 60),
+                      tidy = TRUE,
+                      echo = TRUE)
+```
+
+\newpage
+
+# Introduction
+
+Analysis of National Health and Nutrition Examination Survey (NHANES) data for investigating associations between environmental exposure to pesticides, heavy metals and kidney function. NHANES is a continuous study, conducted by the Centers for Disease control (CDC), representative of the US population. The data is Open Access and has ethics approval. Data sets have been harmonized by Nguyuen et al., 2023. Methods and instructions to access data is available at <http://doi.org/10.1101/2023.02.06.23284573>.
+
+This supplementary methods will provide a detailed explanation with accompanying code for the analysis conducted in the manuscript. This explanatory code will focus on the key methodologies only. For assessing the complete code, which includes basic programming for descriptive statistics and appendices, please use the GitHub link.
+
+# Installing and loading necessary packages
+
+The following packages were installed and loaded to run the analysis, and are available on CRAN.
+
+```{r, eval=FALSE}
+install.packages("tidyverse")
+install.packages("broom")
+install.packages("survey")
+install.packages("randomForest")
+install.packages("pdp")
+install.packages("mice")
+install.packages("corrplot")
+if (!requireNamespace("graph", quietly = TRUE)) {
+  install.packages("BiocManager")
+  BiocManager::install("graph")
+}
+if (!requireNamespace("zenplots", quietly = TRUE)) {
+  install.packages("zenplots")
+}
+install.packages("vivid")
+```
+
+# Importing the data and creating a data frame
+
+## Importing the dictionary
+
+The dictionary can be used to search NHANES data sets for variables of interest. The dictionary is a .csv file, and can be read into R using the read_csv function from the readr package. Downloaded data from Nguyuen et al., 2023 was saved in the folder "cleaned". The dictionary was read into R and saved as a data frame called "dictionary_nhanes".
+
+```{r, message=FALSE, warning=FALSE, eval = FALSE}
+library(readr)
+
+dictionary_nhanes <- read_csv("D:/R/NHANESdata/nhanesckdu/cleaned/38575577_dictionary_nhanes.csv")
+```
+
+## Importing data
+
+The data is available from Nguyuen et al., 2023. The data was downloaded and saved following the path "D:/R/NHANESdata/nhanesckdu/cleaned/". The data was read into R, using the readr package, and saved as a data frame.
+
+```{r, message=FALSE, warning=FALSE, eval = FALSE}
+library(readr)
+
+chemicals_clean <- read_csv("D:/R/NHANESdata/nhanesckdu/cleaned/chemicals_clean.csv")
+demographics_clean <- read_csv("D:/R/NHANESdata/nhanesckdu/cleaned/demographics_clean.csv")
+mortality_clean <- read_csv("D:/R/NHANESdata/nhanesckdu/cleaned/mortality_clean.csv")
+comments_clean <- read_csv("D:/R/NHANESdata/nhanesckdu/cleaned/comments_clean.csv")
+response_clean <- read_csv("D:/R/NHANESdata/nhanesckdu/cleaned/response_clean.csv")
+weights_clean <- read_csv("D:/R/NHANESdata/nhanesckdu/cleaned/weights_clean.csv")
+medications_clean <- read_csv("D:/R/NHANESdata/nhanesckdu/cleaned/medications_clean.csv")
+questionnaire_clean <- read_csv("D:/R/NHANESdata/nhanesckdu/cleaned/questionnaire_clean.csv")
+```
+
+## Creating a single data frame named "nhanes_merged" which contains all data
+
+It is important that only the data sets, which are being used are included in the merge. This is because the merge function will create a new data frame with all the variables from the data sets being merged. If all data sets are merged, the new data frame will be very large, using excessive computing resources to run. The data sets were merged using the full_join function from the dplyr package. The data sets were merged by the three de-identified participant identifiers: SEQN, SEQN_new, and SDDSRVYR.
+
+```{r, eval = FALSE}
+library(dplyr)
+
+nhanes_merged <- full_join(demographics_clean, #merge demographics & mortality
+                           mortality_clean, 
+                           by = c("SEQN",
+                                  "SEQN_new", 
+                                  "SDDSRVYR")) %>%
+  full_join(., weights_clean, # previous + weights
+            by = c("SEQN",
+                   "SEQN_new",
+                   "SDDSRVYR")) %>%
+  full_join(., response_clean, # previous + response
+            by = c("SEQN",
+                   "SEQN_new", 
+                   "SDDSRVYR")) %>%
+  full_join(., questionnaire_clean, # previous + questionnaire
+            by = c("SEQN",
+                   "SEQN_new",
+                   "SDDSRVYR")) %>%
+  full_join(., medications_clean, # previous + medications
+            by = c("SEQN",
+                   "SEQN_new",
+                   "SDDSRVYR")) %>%
+  full_join(., chemicals_clean, # previous + chemicals
+            by = c("SEQN",
+                   "SEQN_new", 
+                   "SDDSRVYR"))
+```
+
+## Removing duplicate participants
+
+For data sets such as medications_clean, several medication replicates were included for each participant. This occurred since participants were asked the name of their medications, and the number of medications they were taking. When a participant reported taking multiple medications, a replicate was generated for the new medication. The following code removes these replicates, and keeps only the first instance of each participant.
+
+```{r, eval = FALSE}
+nhanes_merged <- nhanes_merged[!duplicated(nhanes_merged$SEQN_new), ]
+```
+
+# Defining low kidney function
+
+The following code groups participants into a binary outcome variable "kdamage", which represents low kidney function, determined by an estimated glomerular filtration rate (eGFR) best indicative of stage 4 chronic kidney disease. Participants with an eGFR (denoted by variable codename "VNEGFR") of less than or equal to 44 mL/min/1.73m^2^ are assigned a value of 1. Participants with greater 44 mL/min/1.73m^2^ are allocated a value of 0.
+
+```{r, eval = FALSE}
+nhanes_merged$kdamage <- ifelse(nhanes_merged$VNEGFR <= 44, 1, 0)
+```
+
+Next, participants without a measure for eGFR were eliminated from the dataset
+
+```{r, eval = FALSE}
+nhanes_merged <- nhanes_merged[!is.na(nhanes_merged$VNEGFR), ]
+```
+
+# Data Management
+
+## Ensuring sex and race/ethnicity variables are categorical
+
+```{r, eval = FALSE}
+library (dplyr)
+
+nhanes_merged <- nhanes_merged %>%
+  mutate(RIAGENDR = factor(RIAGENDR)) %>% #sex
+  mutate(RIDRETH1 = factor(RIDRETH1) %>% #race/ethnicity
+                               #(reference group as Non-Hispanic whites "3", 
+                               # "1" = Mexican American,
+                               # "2" = Other Hispanic,
+                               # "4" = Non-Hispanic Black,
+                               # "5" = Other Race (Including Multi-Racial))
+           relevel(., ref = 3)) #reference group as Non-Hispanic whites "3"
+```
+
+## Identifying hypertensive participants
+
+Participants were considered hypertensive if they met either of the following criteria. (1) they had a systolic blood pressure greater than or equal to 140 mmHg or they had a diastolic blood pressure greater than or equal to 90 mmHg. (2) Participants were taking antihypertensive medications:
+
+```{r, eval = FALSE}
+library(dplyr)
+
+# Setting hypertension criteria
+threshold_systolic <- 140  #threshold for systolic blood pressure
+threshold_diastolic <- 90  #threshold for diastolic blood pressure
+
+#listing antihypertensive medications
+bp_medication_list <- c("LISINOPRIL", "LOSARTAN", "AMLODIPINE", "METOPROLOL", "HYDROCHLOROTHIAZIDE",
+                        "ENALAPRIL", "ATENOLOL", "VALSARTAN", "CAPTOPRIL", "CLONIDINE",
+                        "DILTIAZEM", "VERAPAMIL", "PROPRANOLOL", "FUROSEMIDE", "CHLORTHALIDONE",
+                        "SPIRONOLACTONE", "IRBESARTAN", "NIFEDIPINE", "METHYLDOPA", "CARVEDILOL")
+
+# Creating a binary outcome variable for hypertension in the original dataset
+nhanes_merged <- nhanes_merged %>%
+  mutate(hypertension = ifelse(VNAVEBPXSY >= threshold_systolic | VNLBAVEBPXDI >= threshold_diastolic | nhanes_merged$RXDDRUG %in% bp_medication_list, 1, 0)) #1 = hypertensive, 0 = non-hypertensive
+```
+
+## Identifying diabetic participants
+
+```{r, eval = FALSE}
+library(dplyr)
+
+#Setting diabetes criteria
+glucose_threshold <- 126
+
+# Creating a binary diabetes diagnosis variable
+nhanes_merged <- nhanes_merged %>%
+  mutate(diabetic = ifelse(LBXGLU >= glucose_threshold, 1, 0)) #1 = diabetic, 0 = non-diabetic
+```
+
+## Identifying participants that are at or below the poverty income line (PIR) and assigning them a binary predictor variable.
+
+```{r, eval = FALSE}
+library(dplyr)
+
+#Setting PIR criteria
+pir_threshold <- 1.0
+
+# Create a binary variable for above/below PIR threshold
+nhanes_merged <- nhanes_merged %>%
+  mutate(pir = ifelse(INDFMPIR <= pir_threshold, 0, 1)) #0 = below PIR, 1 = above PIR
+```
+
+## Identifying participatns with smoke exposure
+
+Using cotinine levels to estimate the smoke exposure of each participant and classifying them as smoker and non-smoker using, binary, numeric classification
+
+```{r, eval = FALSE}
+library(dplyr)
+
+smoke_exposure <- 10 #cotinine level of 10ng/ml used as cut-off for smoke exposure
+
+nhanes_merged <- nhanes_merged %>%
+  mutate(smoke_exposure = ifelse(LBXCOT <= smoke_exposure, 0, 1)) #0 = non-smoker, 1 = smoker
+```
+
+## Identifying participants who are active drinkers
+
+This will be done by assigning a binary value of 1 to active drinkers and 0 to non-drinkers. Participants will be differentiated by questionnaire outcomes. If the participant reports drinking at least 12 drinks in the past 12 months, they will be considered a drinker. If they have had less than 12 they will be considered abstinent.
+
+NOTE: Participants that refused to answer, or claimed not to know their alcohol consumption are removed from the data frame.
+
+```{r, eval = FALSE}
+library(dplyr)
+
+nhanes_merged$ALQ101[nhanes_merged$ALQ101 %in% c(9, 7)] <- NA #Remove participants that refused to answer or claimed not to know their alcohol consumption
+
+nhanes_merged <- nhanes_merged %>% 
+  mutate(alcohol = ifelse(ALQ101 == 1, 1, 0)) #1 = active drinker, 0 = abstinent
+```
+
+## Creating an inclusion criteria for logistic regression
+
+Fist, a variable must be created, which be used to identify participants that meet the inclusion criteria for logistic regression. The following code creates a vector of variables that will be included in the logistic regression model.
+
+```{r, eval = FALSE}
+inclusion_criteria <- c("SEQN", #Participant ID
+                        "SEQN_new", #Participant ID (new)
+                        "SDDSRVYR", #Survey year
+                        "SDMVPSU", #Primary sampling unit
+                        "SDMVSTRA", #Stratification variable
+                        "kdamage") #Outcome variable
+```
+
+## Setting age inclusion criteria
+
+We only want to consider participants between the ages of 20 and 80. Refer to manuscript for justification.
+
+```{r, eval = FALSE}
+nhanes_merged <- nhanes_merged[nhanes_merged$RIDAGEYR >= 20 &
+                               nhanes_merged$RIDAGEYR <= 80, ] 
+```
+
+# Crude, binary logistic regression
+
+The following section of code calculates the odds ratio (OR) for the positive control (cadmium). The framework for this code was repeated for each environmental toxin of interest.
+
+To maximise computational efficiency and reduce the risk of errors, a data frame was created for each environmental toxin of interest. The new data frame for each toxin consists of the inclusion criteria previously specified, the predictor variable (environmental toxin) and the specific weight variable for that predictor variable (provided by NHANES). Participants that do not have the outcome or predictor variable measured were omitted from the data frame (NOTE: this does not include participants below the lower limit of detection that may appear to have an NHANES imputed value of 0 when rounding).
+
+## Creating a data frame (EXAMPLE: cadmium)
+
+```{r, eval = FALSE}
+library(dplyr)
+
+cadmium <- nhanes_merged %>% 
+  select(all_of(inclusion_criteria),
+         "LBXBCD", #Cadmium
+         "WT_LBXBCD") %>%  #Specific weight for cadmium, provided by NHANES
+  na.omit(.) #eliminates participants with missing cadmium data.
+```
+
+## Specifying the design of the survey (EXAMPLE: cadmium)
+
+In order to account for the complex survey design of NHANES, the following code was used to specify the design of the survey.
+
+```{r, eval = FALSE}
+library(survey)
+
+caddsn <- svydesign(ids = ~SDMVPSU, #represents the primary sampling unit
+                    strata = ~SDMVSTRA, #specifies the stratum variable
+                    nest = TRUE, #primary sampling unit is nested within the stratum
+                    data = cadmium, #specifies the data frame,
+                    weights = ~WT_LBXBCD) #specifies the weight variable
+```
+
+## Running model for crude, binary logistic regression (EXAMPLE: cadmium)
+
+```{r, eval = FALSE}
+library(survey)
+library(broom)
+
+logCAD <- svyglm(kdamage ~  #outcome variable (kidney damage)
+                   LBXBCD, #predictor variable (cadmium)
+                   design = caddsn, #design
+                   family = binomial(link = "logit")) #family
+
+CAD_coef_values <- coef(logCAD) #extracting coefficient values
+CAD_odds_ratios <- exp(CAD_coef_values) #calculating odds ratios
+CAD_odds_ratios #printing odds ratios
+
+summary(logCAD) #printing summary of logistic regression
+```
+
+After running the model, the following code was run to calculate and print the 95% confidence intervals (CI) for the odds ratios (EXAMPLE: cadmium)
+
+```{r, eval = FALSE}
+library(survey)
+library(broom)
+
+CAD_CI <- exp(confint(logCAD))
+
+CAD_OR_CI <- data.frame( 
+  Variable = "LBXBCD", #cadmium
+  Odds_Ratio = CAD_odds_ratios, 
+  CI_Lower = CAD_CI[, "2.5 %"], 
+  CI_Upper = CAD_CI[, "97.5 %"])
+
+print(CAD_OR_CI)
+```
+
+# Adjusted, binary logistic regression
+
+The following code is mostly the same as previously specified for the crude logistic regression. The difference is the inclusion of additional predictor variables, which adjusts the model for confounding variables. Through repeated logistic regression testing, age gender, PIR, race/ethnicity, NHANES wave were identified as the confounding variables.
+
+Since the survey weights can only be applied to participants with predictor variable of interest, participants that did not have data for the predictor variable or outcome variable were omitted from the data frame. NOTE: participants that had missing confounded predictor variables were not omitted from the model.
+
+```{r, eval = FALSE}
+library(survey)
+library(dplyr)
+library(broom)
+
+adj_cadmium <- nhanes_merged %>% 
+  select(all_of(inclusion_criteria),
+         "LBXBCD", #Cadmium
+         "pir", #PIR threshold
+         "RIDAGEYR", #age
+         "RIAGENDR", #gender
+         "RIDRETH1", #race/ethnicity
+         "WT_LBXBCD") %>% #Weight for cadmium
+  filter(!is.na(LBXBCD) & !is.na(WT_LBXBCD) & !is.na(kdamage)) #Remove missing values
+
+adjcaddsn <- svydesign(ids = ~SDMVPSU, #represents primary sampling unit
+                    strata = ~SDMVSTRA, #specifies stratum variable
+                    nest = TRUE, #primary sampling unit is nested within the stratum
+                    data = adj_cadmium, #specifies data frame,
+                    weights = ~WT_LBXBCD) #specifies weight variable
+
+adjlogCAD <- svyglm(kdamage ~
+                   LBXBCD + # Variable Codename
+                   pir + #PIR threshold
+                   RIDAGEYR + #age
+                   RIAGENDR + #gender
+                   RIDRETH1, #race/ethnicity
+                 design = adjcaddsn,
+                 family = binomial(link = "logit")) 
+
+adj_CAD_coef_values <- coef(adjlogCAD)
+adj_CAD_odds_ratios <- exp(adj_CAD_coef_values)
+adj_CAD_odds_ratios
+
+summary(adjlogCAD)
+
+adj_CAD_CI <- exp(confint(adjlogCAD))
+
+adj_CAD_OR_CI <- data.frame(
+  Variable = "LBXBCD", #cadmium
+  Odds_Ratio = adj_CAD_odds_ratios,
+  CI_Lower = adj_CAD_CI[, "2.5 %"],
+  CI_Upper = adj_CAD_CI[, "97.5 %"])
+
+print(adj_CAD_OR_CI)
+```
+
+# Ensemble Learning Model: Random Forest Regression
+
+## Creating a refined data frame with selected variables (see manuscript for details)
+
+```{r, eval = FALSE}
+# First, a refined data frame must be generated, which only consists of selected variables. This data frame will be named "rf_regression"
+
+rf_regression <- data.frame(eGFR = nhanes_merged$VNEGFRADJ,
+                            Cadmium = nhanes_merged$LBXBCD,
+                            Lead = nhanes_merged$LBXBPB,
+                            Malathion = nhanes_merged$URXMAL,
+                            n2_4_D = nhanes_merged$URX24D,
+                            Age = nhanes_merged$RIDAGEYR,
+                            Gender = nhanes_merged$RIAGENDR,
+                            Race = nhanes_merged$RIDRETH1)
+
+#Next participants with missing data must be eliminated from the data frame
+rf_regression <- na.omit(rf_regression)
+```
+
+NOTE: For visualising the odds ratios, forest plots were used. These plots were generated using the "ggplot2" and "patchwork" packages. Since coding for these plots is not essential for understanding the methods, they have not been included in this guide. Please refer to original code on GitHub for details.
+
+# Machine learning model
+
+The following code will use the "randomForest" package to predict the outcome variable (estimated Glomerular Filtration Rate) using the predictor variables (Pesticides & Heavy Metals).
+
+## Train-Test Split
+
+The data must be split into a training and testing data frame. This is arbitrary split and there is no set criteria to determine the train-test split, provided the data is of sufficient size. For this reason I chose the 80:20 ratio. I then chose to cross-validate the model using a 70:30 and 90:10 split, which can be found in the appendix of the manuscript.
+
+```{r, cache=TRUE, eval = FALSE}
+set.seed(123) #specifies the random seed generator. This is an arbitrary number specified to ensure reproducibility
+train_indices <- sample(1:nrow(rf_regression), ceiling(0.8 * nrow(rf_regression))) #generates a random sample of 80% of the data
+train_data <- rf_regression[train_indices, ] # Generates training data frame
+test_data <- rf_regression[-train_indices, ] # Generates testing data frame
+```
+
+## Training the Random Forest Model
+
+The following code will train the random forest model using the training data frame. The model will be named "rf_model". Please refer to main manuscript (Section 3: Methods) for justification of parameters used.
+
+```{r, cache=TRUE, eval = FALSE}
+library(randomForest)
+
+rf_model <- randomForest(eGFR ~ ., #outcome variable
+                         data = train_data, #training data frame
+                         ntree = 1000, #number of trees
+                         importance=TRUE, #calculate importance of each variable
+                         do.trace = TRUE) #prints the progress of the model as it is running
+```
+
+## Generate predictions on the test data frame
+
+```{r, cache=TRUE, eval = FALSE}
+predictions <- predict(rf_model, newdata = test_data) #generates predictions on test data frame
+```
+
+## Evaluate the model
+
+The following code will evaluate the model using the test data frame. The following metrics will be calculated: Mean Absolute Error (MAE), Accuracy and precision
+
+```{r, cache=TRUE, eval = FALSE}
+#Code to evaluate accuracy metrics of the model
+mse <- mean((test_data$eGFR - predictions)^2) # Mean Squared Error (MSE)
+rmse <- sqrt(mse) # Root Mean Squared Error (RMSE)
+mae <- mean(abs(test_data$eGFR - predictions)) # Mean Absolute Error (MAE)
+r_squared <- cor(test_data$eGFR, predictions)^2 # R-squared (R²)
+
+# Print the accuracy metrics
+print(paste("Mean Squared Error:", mse))
+print(paste("Root Mean Squared Error:", rmse))
+print(paste("Mean Absolute Error:", mae))
+print(paste("R-squared:", r_squared))
+```
+
+# Generating Partial Dependence Plots (PDP): for direct (individual) analysis of the relationship between predictor variables and the outcome variable
+
+## programming the framework for generating PDPs
+
+```{r, cache=TRUE, eval = FALSE}
+library(pdp)
+
+features_of_interest <- c("Cadmium",
+                          "Lead",
+                          "Malathion",
+                          "n2_4_D",
+                          "Age",
+                          "Gender",
+                          "Race")
+
+# Create a list to store PDP results
+pdp_results <- list() #create an empty list
+
+# Generate PDPs for each feature
+for (feature in features_of_interest) {
+  pdp_results[[feature]] <- partial(rf_model,
+                                    pred.var = feature, 
+                                    progress = "text", # display progress
+                                    chull = TRUE) # logical argument to constrain values of first two variables of the predictor to lie within their training values 
+}
+```
+
+## Plotting the PDPs
+
+```{r, eval = FALSE}
+library(pdp)
+library(lattice)
+
+toxins <- c("Cadmium",
+            "Lead",
+            "Malathion",
+            "n2_4_D")
+
+axis_titles <- list(
+  "Cadmium" = c("Cadmium (ng/mL)"),
+  "Lead" = c("Lead (ug/dL)"),
+  "Malathion" = c("Malathion diacid (ug/L)"),
+  "n2_4_D" = c("2,4-D (ug/L)"),
+  "Age" = c("Age (years)"),
+  "Gender" = c("Gender"),
+  "Race" = c("Race"))
+
+par(mfrow = c(4, 2), mar = c(4.5, 4.5, 4, 4), cex.main = 1)  # Adjusts layout margins
+for (i in seq_along(toxins)) {
+    x_column <- names(pdp_results[[i]])[1]  # Get dynamically the name of the first column
+    plot(pdp_results[[i]],
+       type = 'p', #specifies point graph
+       pch = 1, #specifies type of point
+       col = "black", #specifies colour of points
+       ity = 4, #specifies type of line
+       lwd = 1, #specifies width of line
+       main = "", #specifies title of graph (in this instance blank)
+       ylim = y_limits, #specifies limits of y-axis
+       xlab = axis_titles[[i]], #specifies title of x-axis
+       ylab = "Predicted eGFR") #specifies title of y-axis
+    rug(train_data[[i+1]], col = "black")  # Add rug plot
+}
+
+
+
+```
+
+# Calculating interaction strength (H-statistic) between predictor variables
+
+## Generating the interaction strength matrix
+
+```{r, eval = FALSE}
+library(vivid)
+library(randomForest)
+
+set.seed(123) #seed for reproducibility
+
+viviRF <- vivi(fit = rf_model,
+               data = train_data,
+               response = "eGFR",
+               gridSize = 100, #number of grid points (resolution)
+               importanceType = "%IncMSE", #the type of importance measure (from the rf_model)
+               nmax = 500, #maximum number of interactions to be calculated
+               reorder = TRUE, #Reorders variables based on importance
+               predictFun = NULL, #specifies prediction function
+               showVimpError = FALSE) #Don't show error of the variable importance
+```
+
+## Illustrating the interaction strength matrix in an interaction network.
+
+```{r, eval = FALSE}
+library(vivid)
+library(randomForest)
+
+viviNetwork(mat = viviRF) #Generates the interaction network
+
+
+```
